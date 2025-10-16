@@ -8,7 +8,6 @@ import warnings
 
 # Suppress Streamlit warnings
 warnings.filterwarnings('ignore')
-st.set_option('deprecation.showPyplotGlobalUse', False)
 
 # Page configuration
 st.set_page_config(
