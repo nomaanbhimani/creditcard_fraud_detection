@@ -4,6 +4,11 @@ import numpy as np
 import pickle
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
+import warnings
+
+# Suppress Streamlit warnings
+warnings.filterwarnings('ignore')
+st.set_option('deprecation.showPyplotGlobalUse', False)
 
 # Page configuration
 st.set_page_config(
@@ -287,11 +292,13 @@ def main():
                             else:
                                 display_df = df
                             
+                            # Display without styling for large datasets to avoid render limits
+                            display_columns = display_df[['Time', 'Amount', 'Result', 'Fraud_Probability']].copy()
+                            display_columns['Amount'] = display_columns['Amount'].apply(lambda x: f'${x:.2f}')
+                            display_columns['Fraud_Probability'] = display_columns['Fraud_Probability'].apply(lambda x: f'{x:.4f}')
+                            
                             st.dataframe(
-                                display_df[['Time', 'Amount', 'Result', 'Fraud_Probability']].style.format({
-                                    'Fraud_Probability': '{:.4f}',
-                                    'Amount': '${:.2f}'
-                                }),
+                                display_columns,
                                 use_container_width=True
                             )
                             
