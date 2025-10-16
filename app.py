@@ -5,6 +5,7 @@ import pickle
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import warnings
+from io import StringIO
 
 # Suppress Streamlit warnings
 warnings.filterwarnings('ignore')
@@ -198,7 +199,7 @@ def main():
                         
                         st.info(f"{color} Risk Level: **{risk}**")
     
-    # Tab 2: Batch Prediction (MODIFIED FOR MEMORY EFFICIENCY)
+    # Tab 2: Batch Prediction (REBUILT FOR MAXIMUM MEMORY EFFICIENCY)
     with tabs[1]:
         st.header("Batch Transaction Analysis")
         st.write("Upload a CSV file with transaction data for batch analysis.")
@@ -210,128 +211,108 @@ def main():
         )
         
         if uploaded_file is not None:
-            required_cols = ['Time'] + [f'V{i}' for i in range(1, 29)] + ['Amount']
-            
             if st.button("🚀 Analyze All Transactions", type="primary"):
-                results_list = []
-                total_rows = 0
                 
-                # Use a progress bar to show status
+                # Initialize counters and a list to hold only fraudulent transaction data
+                total_transactions = 0
+                fraud_count = 0
+                fraud_results = []
+                
                 progress_bar = st.progress(0, text="Starting analysis...")
 
                 try:
-                    # Estimate total lines for progress bar without loading all into memory
-                    # This is a bit of a workaround but is memory efficient
-                    uploaded_file.seek(0)
-                    num_lines = sum(1 for _ in uploaded_file)
-                    uploaded_file.seek(0) # Reset file pointer to the beginning
-
-                    # Process the file in chunks of 50,000 rows
+                    # Decode uploaded file for line counting
+                    stringio = StringIO(uploaded_file.getvalue().decode("utf-8"))
+                    num_lines = sum(1 for _ in stringio) -1
+                    uploaded_file.seek(0) # Reset file pointer
+                    
+                    # Process the file in chunks
                     chunk_size = 50000
                     
                     for i, chunk in enumerate(pd.read_csv(uploaded_file, chunksize=chunk_size)):
-                        current_rows_processed = i * chunk_size + len(chunk)
-                        
-                        # Update progress
-                        progress_text = f"Analyzing... Processed {current_rows_processed} / {num_lines - 1} transactions"
-                        progress_bar.progress(current_rows_processed / (num_lines -1), text=progress_text)
-
-                        # Validate columns in the chunk
-                        missing_cols = [col for col in required_cols if col not in chunk.columns]
-                        if missing_cols:
-                            st.error(f"Missing columns in CSV: {', '.join(missing_cols)}")
-                            st.stop()
+                        # Check for required columns in the first chunk
+                        if i == 0:
+                            required_cols = ['Time'] + [f'V{i}' for i in range(1, 29)] + ['Amount']
+                            missing_cols = [col for col in required_cols if col not in chunk.columns]
+                            if missing_cols:
+                                st.error(f"Missing columns in CSV: {', '.join(missing_cols)}")
+                                st.stop()
                         
                         # Make predictions on the chunk
                         X = chunk[required_cols]
                         predictions = model.predict(X)
                         probabilities = model.predict_proba(X)[:, 1]
                         
-                        # Add results to the chunk
+                        # Update counts
+                        total_transactions += len(chunk)
                         chunk['Prediction'] = predictions
-                        chunk['Fraud_Probability'] = probabilities
-                        chunk['Result'] = chunk['Prediction'].map({0: 'Legitimate', 1: 'Fraud'})
                         
-                        results_list.append(chunk)
+                        # Find fraudulent transactions in the current chunk
+                        is_fraud = chunk['Prediction'] == 1
+                        current_fraud_count = is_fraud.sum()
+                        
+                        if current_fraud_count > 0:
+                            fraud_count += current_fraud_count
+                            chunk['Fraud_Probability'] = probabilities
+                            fraud_results.append(chunk[is_fraud])
 
+                        # Update progress bar
+                        progress_text = f"Analyzing... Processed {total_transactions} / {num_lines} transactions"
+                        progress_bar.progress(min(1.0, total_transactions / num_lines), text=progress_text)
+                    
                     progress_bar.empty() # Remove the progress bar
-                    
-                    # Combine all processed chunks into a single dataframe
-                    df = pd.concat(results_list, ignore_index=True)
-                    
-                    st.success(f"✅ Analysis complete for {len(df)} transactions!")
-                    
-                    # --- From here, the rest of your visualization code is the same ---
+                    st.success(f"✅ Analysis complete for {total_transactions} transactions!")
+
+                    # --- Display Results (using only aggregated data and fraudulent transactions) ---
+                    legit_count = total_transactions - fraud_count
+                    fraud_pct = (fraud_count / total_transactions) * 100 if total_transactions > 0 else 0
                     
                     # Summary metrics
                     col1, col2, col3, col4 = st.columns(4)
-                    fraud_count = df['Prediction'].sum()
-                    fraud_pct = (fraud_count / len(df)) * 100
-                    
-                    col1.metric("Total Transactions", len(df))
+                    col1.metric("Total Transactions", total_transactions)
                     col2.metric("Fraudulent", fraud_count)
-                    col3.metric("Legitimate", len(df) - fraud_count)
+                    col3.metric("Legitimate", legit_count)
                     col4.metric("Fraud Rate", f"{fraud_pct:.2f}%")
-                    
-                    # Visualizations
+
                     st.subheader("Analysis Results")
                     
-                    viz_col1, viz_col2 = st.columns(2)
+                    # Pie chart (uses only aggregate counts)
+                    fig_pie = go.Figure(data=[go.Pie(
+                        labels=['Legitimate', 'Fraud'],
+                        values=[legit_count, fraud_count],
+                        marker_colors=['#00cc00', '#ff4b4b']
+                    )])
+                    fig_pie.update_layout(title="Transaction Distribution")
+                    st.plotly_chart(fig_pie, use_container_width=True)
                     
-                    with viz_col1:
-                        fig_pie = go.Figure(data=[go.Pie(
-                            labels=['Legitimate', 'Fraud'],
-                            values=[len(df) - fraud_count, fraud_count],
-                            marker_colors=['#00cc00', '#ff4b4b']
-                        )])
-                        fig_pie.update_layout(title="Transaction Distribution")
-                        st.plotly_chart(fig_pie, use_container_width=True)
+                    # Show results table (only shows fraudulent transactions)
+                    st.subheader("Detected Fraudulent Transactions")
                     
-                    with viz_col2:
-                        fig_hist = go.Figure(data=[go.Histogram(
-                            x=df['Fraud_Probability'],
-                            nbinsx=50,
-                            marker_color='#1f77b4'
-                        )])
-                        fig_hist.update_layout(
-                            title="Fraud Probability Distribution",
-                            xaxis_title="Probability",
-                            yaxis_title="Count"
-                        )
-                        st.plotly_chart(fig_hist, use_container_width=True)
-                    
-                    # Show results table
-                    st.subheader("Detailed Results")
-                    filter_option = st.selectbox(
-                        "Filter results:",
-                        ["All Transactions", "Fraudulent Only", "Legitimate Only"]
-                    )
-                    
-                    if filter_option == "Fraudulent Only":
-                        display_df = df[df['Prediction'] == 1]
-                    elif filter_option == "Legitimate Only":
-                        display_df = df[df['Prediction'] == 0]
+                    if not fraud_results:
+                        st.info("No fraudulent transactions were detected.")
                     else:
-                        display_df = df
-                    
-                    display_columns = display_df[['Time', 'Amount', 'Result', 'Fraud_Probability']].copy()
-                    display_columns['Amount'] = display_columns['Amount'].apply(lambda x: f'${x:.2f}')
-                    display_columns['Fraud_Probability'] = display_columns['Fraud_Probability'].apply(lambda x: f'{x:.4f}')
-                    
-                    st.dataframe(display_columns, use_container_width=True)
-                    
-                    # Download results
-                    csv = df.to_csv(index=False)
-                    st.download_button(
-                        label="📥 Download Results as CSV",
-                        data=csv,
-                        file_name="fraud_detection_results.csv",
-                        mime="text/csv",
-                        use_container_width=True
-                    )
+                        # Combine all fraudulent chunks into a single small dataframe
+                        fraud_df = pd.concat(fraud_results, ignore_index=True)
+                        
+                        display_columns = fraud_df[['Time', 'Amount', 'Fraud_Probability']].copy()
+                        display_columns['Amount'] = display_columns['Amount'].apply(lambda x: f'${x:.2f}')
+                        display_columns['Fraud_Probability'] = display_columns['Fraud_Probability'].apply(lambda x: f'{x:.4f}')
+                        
+                        st.dataframe(display_columns, use_container_width=True)
+                        
+                        # Download button for fraudulent transactions only
+                        csv = fraud_df.to_csv(index=False)
+                        st.download_button(
+                            label="📥 Download Fraudulent Transactions as CSV",
+                            data=csv,
+                            file_name="fraudulent_transactions.csv",
+                            mime="text/csv",
+                            use_container_width=True
+                        )
 
                 except Exception as e:
-                    st.error(f"Error processing file: {str(e)}")
+                    st.error(f"An error occurred during analysis: {str(e)}")
+
 
     # Tab 3: How to Use
     with tabs[2]:
@@ -358,7 +339,7 @@ def main():
         1. Navigate to the "Batch Prediction" tab
         2. Upload a CSV file with your transaction data
         3. Click "Analyze All Transactions"
-        4. Review the analysis and download results
+        4. Review the analysis and download results. **Note:** For large files, only fraudulent transactions will be displayed and available for download to prevent memory issues.
         
         ### 📋 CSV Format Example
         
